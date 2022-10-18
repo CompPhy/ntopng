@@ -350,7 +350,7 @@ local function validateOnOff(mode)
 end
 
 local function validateMode(mode)
-   local modes = {"all", "local", "local_no_tx", "remote", "remote_no_tx",
+   local modes = {"all", "local", "local_no_tx",  "local_no_tcp_tx", "remote", "remote_no_tx", "remote_no_tcp_tx",
 		  "broadcast_domain", "filtered", "blacklisted",
 		  "dhcp", "restore", "client_duration", "server_duration",
 		  "client_frequency", "server_frequency"  }
@@ -1253,7 +1253,14 @@ local function validateAssociations(associations)
 
    for k, v in pairs(associations) do
       if not isValidPoolMember(k) then
-	 return false
+         -- Try to fix the format (add prefix/vlan if missing)
+         local fixedk = fixPoolMemberFormat(k)
+         if fixedk and isValidPoolMember(fixedk) then
+            associations[fixedk] = v
+            associations[k] = nil
+         else
+	    return false
+         end
       end
    end
 

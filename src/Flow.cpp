@@ -55,7 +55,7 @@ Flow::Flow(NetworkInterface *_iface,
   predominant_alert_info.is_cli_victim = 0;
   predominant_alert_info.is_srv_attacker = 0;
   predominant_alert_info.is_srv_victim = 0;
-  json_protocol_info = NULL, riskInfo = NULL;
+  json_protocol_info = NULL, riskInfo = NULL, ndpiAddressFamilyProtocol = NULL;
   privateFlowId = _private_flow_id;
   clearRisks();
   detection_completed = 0;
@@ -80,7 +80,7 @@ Flow::Flow(NetworkInterface *_iface,
   json_info = NULL, tlv_info = NULL, twh_over = twh_ok = 0,
     dissect_next_http_packet = 0, host_server_name = NULL;
   bt_hash = NULL;
-  flow_payload = NULL, flow_payload_len = 0; 
+  flow_payload = NULL, flow_payload_len = 0;
   flow_verdict = 0;
   flow_serial = _iface->getNewFlowSerial();
   operating_system = os_unknown;
@@ -143,7 +143,7 @@ Flow::Flow(NetworkInterface *_iface,
     }
   } else {
     /* Client host has not been allocated, let's keep the info in an IpAddress */
-    
+
     if((cli_ip_addr = new (std::nothrow) IpAddress(*_cli_ip)))
       cli_ip_addr->reloadBlacklist(iface->get_ndpi_struct());
   }
@@ -164,7 +164,7 @@ Flow::Flow(NetworkInterface *_iface,
     }
   } else {
     /* Server host has not been allocated, let's keep the info in an IpAddress */
-    
+
     if((srv_ip_addr = new (std::nothrow) IpAddress(*_srv_ip)))
       srv_ip_addr->reloadBlacklist(iface->get_ndpi_struct());
   }
@@ -302,6 +302,8 @@ void Flow::freeDPIMemory() {
 /* *************************************** */
 
 Flow::~Flow() {
+  bool is_oneway_tcp_syn_seen = ((protocol == IPPROTO_TCP) && (get_packets_srv2cli() == 0) && (src2dst_tcp_flags == TH_SYN)) ? true : false;
+  
   if(getUses() != 0 && !ntop->getGlobals()->isShutdown())
     ntop->getTrace()->traceEvent(TRACE_NORMAL, "[%s] Deleting flow [%u]", __FUNCTION__, getUses());
 
@@ -327,9 +329,13 @@ Flow::~Flow() {
   if(getInterface()->isViewed()) /* Score decrements done here for 'viewed' interfaces to avoid races. */
     decAllFlowScores();
 
+  
   if(cli_u) {
     cli_u->decUses(); /* Decrease the number of uses */
     cli_u->decNumFlows(get_last_seen(), true);
+
+    if(is_oneway_tcp_syn_seen)
+      cli_u->incOneWayEgressFlows();
   }
 
   if(!cli_host && cli_ip_addr) /* Dynamically allocated only when cli_host was NULL in Flow constructor (viewed interfaces) */
@@ -338,6 +344,9 @@ Flow::~Flow() {
   if(srv_u) {
     srv_u->decUses(); /* Decrease the number of uses */
     srv_u->decNumFlows(get_last_seen(), false);
+
+    if(is_oneway_tcp_syn_seen)
+      srv_u->incOneWayIngressFlows();    
   }
 
   if(!srv_host && srv_ip_addr) /* Dynamically allocated only when srv_host was NULL in Flow constructor (viewed interfaces) */
@@ -360,8 +369,8 @@ Flow::~Flow() {
   if(host_server_name)              free(host_server_name);
   if(iec104)                        delete iec104;
   if(suspicious_dga_domain)         free(suspicious_dga_domain);
-
-  if(ebpf) delete ebpf;
+  if(ndpiAddressFamilyProtocol)     free(ndpiAddressFamilyProtocol);
+  if(ebpf)                          delete ebpf;
 
   if(cli2srvPktTime) delete cli2srvPktTime;
   if(srv2cliPktTime) delete srv2cliPktTime;
@@ -370,7 +379,7 @@ Flow::~Flow() {
   if(entropy.s2c) ndpi_free_data_analysis(entropy.s2c, 1);
 
   if(flow_payload)                   free(flow_payload);
-  
+
   if(isHTTP()) {
     if(protos.http.last_url)         free(protos.http.last_url);
     if(protos.http.last_user_agent)  free(protos.http.last_user_agent);
@@ -761,9 +770,9 @@ void Flow::processExtraDissectedInformation() {
     /* Save riskInfo */
     char *out, buf[512];
     struct ndpi_flow_struct* f = get_ndpi_flow();
-    
+
     out = ndpi_get_flow_risk_info(f, buf, sizeof(buf), 1 /* JSON */);
-    
+
     if(out != NULL)
       setJSONRiskInfo(out);
 
@@ -886,7 +895,7 @@ void Flow::processPacket(const struct pcap_pkthdr *h,
       } else if(isBlacklistedServer()) {
 	if(srv_host) srv_host->setBlacklistName((char*)get_custom_category_file());
       }
-      
+
       ntop->incBlacklisHits(std::string(get_custom_category_file()));
     }
   }
@@ -935,7 +944,7 @@ void Flow::processDNSPacket(const u_char *ip_packet, u_int16_t ip_len, u_int64_t
       }
       if(ndpiFlow->protos.dns.query_type != 0)
 	protos.dns.last_query_type = ndpiFlow->protos.dns.query_type;
-      
+
       if(!ndpiFlow->protos.dns.is_query) {
 	/* this is a response... */
 	if(ntop->getPrefs()->is_dns_decoding_enabled()) {
@@ -1066,7 +1075,15 @@ void Flow::setExtraDissectionCompleted() {
     }
   }
 
-  if(ndpiFlow) setErrorCode(ndpi_get_flow_error_code(ndpiFlow));
+  if(ndpiFlow) {
+    setErrorCode(ndpi_get_flow_error_code(ndpiFlow));
+
+    if(ndpiDetectedProtocol.protocol_by_ip != NDPI_PROTOCOL_UNKNOWN) {
+      char *p = ndpi_get_proto_name(iface->get_ndpi_struct(), ndpiDetectedProtocol.protocol_by_ip);
+
+      setAddressFamilyProtocol(p);
+    }
+  }
 
   processExtraDissectedInformation();
 
@@ -1092,6 +1109,8 @@ void Flow::updateProtocol(ndpi_protocol proto_id) {
 
   if(ndpiDetectedProtocol.master_protocol == ndpiDetectedProtocol.app_protocol)
     ndpiDetectedProtocol.master_protocol = NDPI_PROTOCOL_UNKNOWN;
+
+  ndpiDetectedProtocol.protocol_by_ip = proto_id.protocol_by_ip;
 
   /* NOTE: only overwrite the category if it was not set.
    * This prevents overwriting already determined category (e.g. by IP or Host)
@@ -1397,7 +1416,7 @@ char* Flow::print(char *buf, u_int buf_len) const {
 
 bool Flow::dump(time_t t, bool last_dump_before_free) {
   bool rc = false;
-    
+
   if(!ntop->getPrefs()->is_tiny_flows_export_enabled() && isTiny()) {
 #ifdef TINY_FLOWS_DEBUG
     ntop->getTrace()->traceEvent(TRACE_NORMAL,
@@ -2131,7 +2150,7 @@ bool Flow::equal(const IpAddress *_cli_ip, const IpAddress *_srv_ip,
 
   if(getPrivateFlowId() != _private_flow_id)
     return(false);
-  
+
   if((get_vlan_id() != _vlanId)
 #ifdef MAKE_OBSERVATION_POINT_KEY
      /*
@@ -2248,7 +2267,7 @@ void Flow::lua(lua_State* vm, AddressTree * ptree,
   bool has_json_info = false;
   u_char community_id[200];
   char buf[64];
-  
+
   if(ptree) {
     if(src_ip) src_match = src_ip->match(ptree);
     if(dst_ip) dst_match = dst_ip->match(ptree);
@@ -2277,7 +2296,7 @@ void Flow::lua(lua_State* vm, AddressTree * ptree,
 
     if(vrfId) lua_push_uint64_table_entry(vm, "vrfId", vrfId);
 
-    /* See VLANAddressTree.h for details */    
+    /* See VLANAddressTree.h for details */
     lua_push_uint32_table_entry(vm, "observation_point_id", get_observation_point_id());
 
     if(srcAS)
@@ -2349,7 +2368,7 @@ void Flow::lua(lua_State* vm, AddressTree * ptree,
     lua_push_int32_table_entry(vm, "srv.devtype", (srv_host && srv_host->getMac()) ? srv_host->getMac()->getDeviceType() : device_unknown);
 
     lua_push_int32_table_entry(vm, "flow_serial", flow_serial);
-    
+
 #ifdef HAVE_NEDGE
     if(iface->is_bridge_interface())
       lua_push_bool_table_entry(vm, "verdict.pass", isPassVerdict() ? 1 : 0);
@@ -2424,7 +2443,7 @@ void Flow::lua(lua_State* vm, AddressTree * ptree,
       flow_payload[flow_payload_len] = '\0';
       lua_push_str_table_entry(vm, "flow_payload", flow_payload);
     }
-    
+
     if(get_json_info()) {
       lua_push_str_table_entry(vm, "moreinfo.json", json_object_to_json_string(get_json_info()));
       has_json_info = true;
@@ -2485,7 +2504,7 @@ void Flow::lua(lua_State* vm, AddressTree * ptree,
 
   lua_push_str_table_entry(vm, "proto.ndpi",
 			   detection_completed ? get_detected_protocol_name(buf, sizeof(buf)) : (char*)CONST_TOO_EARLY);
-    
+
   // this is used to dynamicall update entries in the GUI
   lua_push_uint64_table_entry(vm, "ntopng.key", key()); // Key
   lua_push_uint64_table_entry(vm, "hash_entry_id", get_hash_entry_id());
@@ -4141,7 +4160,7 @@ void Flow::updateTcpFlags(const struct bpf_timeval *when,
 	if((synAckTime.tv_sec == 0) && (synTime.tv_sec > 0)) {
 	  memcpy(&synAckTime, when, sizeof(struct timeval));
 	  timeval_diff(&synTime, (struct timeval*)when, &serverNwLatency, 1);
-	  /* Sanity check */
+	  /* Coherence check */
 	  if(serverNwLatency.tv_sec > 5)
 	    memset(&serverNwLatency, 0, sizeof(serverNwLatency));
 	  else if(srv_host)
@@ -4154,7 +4173,7 @@ void Flow::updateTcpFlags(const struct bpf_timeval *when,
 	  memcpy(&ackTime, when, sizeof(struct timeval));
 	  timeval_diff(&synAckTime, (struct timeval*)when, &clientNwLatency, 1);
 
-	  /* Sanity check */
+	  /* Coherence check */
 	  if(clientNwLatency.tv_sec > 5)
 	    memset(&clientNwLatency, 0, sizeof(clientNwLatency));
 	  else if(cli_host)
@@ -4537,7 +4556,7 @@ void Flow::setBittorrentHash(char *hash) {
 
   for(i=0, j = 0; i<20; i++) {
     u_char c = hash[i] & 0xFF;
-    
+
     snprintf(&bittorrent_hash[j], 2, "%02x", c);
     j += 2, n += c;
   }
@@ -5537,6 +5556,9 @@ void Flow::lua_get_protocols(lua_State* vm) const {
 
   lua_push_uint64_table_entry(vm, "proto.ndpi_cat_id", get_protocol_category());
   lua_push_str_table_entry(vm, "proto.ndpi_cat", get_protocol_category_name());
+
+  if(getAddressFamilyProtocol())
+    lua_push_str_table_entry(vm, "proto.ndpi_address_family", getAddressFamilyProtocol());
 
   if(get_custom_category_file())
     lua_push_str_table_entry(vm, "proto.ndpi_cat_file", get_custom_category_file());

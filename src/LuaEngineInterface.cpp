@@ -2333,6 +2333,32 @@ static int ntop_get_interface_host_info(lua_State* vm) {
 
 /* ****************************************** */
 
+static int ntop_reset_interface_host_top_sites(lua_State* vm) {
+  NetworkInterface *ntop_interface = getCurrentInterface(vm);
+  char *host_ip;
+  VLANid vlan_id = 0;
+  char buf[64];
+
+  ntop->getTrace()->traceEvent(TRACE_DEBUG, "%s() called", __FUNCTION__);
+
+  if(ntop_lua_check(vm, __FUNCTION__, 1, LUA_TSTRING) != CONST_LUA_OK)
+    return(ntop_lua_return_value(vm, __FUNCTION__, CONST_LUA_ERROR));
+  
+  get_host_vlan_info((char*)lua_tostring(vm, 1), &host_ip, &vlan_id, buf, sizeof(buf));
+
+  /* Optional VLAN id */
+  if(lua_type(vm, 2) == LUA_TNUMBER) vlan_id = (u_int16_t)lua_tonumber(vm, 2);
+
+  if((!ntop_interface)
+     || !ntop_interface->resetHostTopSites(get_allowed_nets(vm), host_ip,
+					   vlan_id, getLuaVMUservalue(vm, observationPointId)))
+    return(ntop_lua_return_value(vm, __FUNCTION__, CONST_LUA_ERROR));
+  else
+    return(ntop_lua_return_value(vm, __FUNCTION__, CONST_LUA_OK));
+}
+
+/* ****************************************** */
+
 static int ntop_get_interface_host_country(lua_State* vm) {
   NetworkInterface *ntop_interface = getCurrentInterface(vm);
   char *host_ip;
@@ -3343,12 +3369,20 @@ static int ntop_get_interface_local_hosts_no_tx_info(lua_State* vm) {
   return(ntop_get_interface_hosts(vm, location_local_only_no_tx));
 }
 
+static int ntop_get_interface_local_hosts_no_tcp_tx_info(lua_State* vm) {
+  return(ntop_get_interface_hosts(vm, location_local_only_no_tcp_tx));
+}
+
 static int ntop_get_interface_remote_hosts_info(lua_State* vm) {
   return(ntop_get_interface_hosts(vm, location_remote_only));
 }
 
 static int ntop_get_interface_remote_hosts_no_tx_info(lua_State* vm) {
   return(ntop_get_interface_hosts(vm, location_remote_only_no_tx));
+}
+
+static int ntop_get_interface_remote_hosts_no_tcp_tx_info(lua_State* vm) {
+  return(ntop_get_interface_hosts(vm, location_remote_only_no_tcp_tx));
 }
 
 static int ntop_get_interface_broadcast_domain_hosts_info(lua_State* vm) {
@@ -4577,8 +4611,10 @@ static luaL_Reg _ntop_interface_reg[] = {
   { "getHostsInfo",             ntop_get_interface_hosts_info },
   { "getLocalHostsInfo",        ntop_get_interface_local_hosts_info },
   { "getLocalHostsInfoNoTX",    ntop_get_interface_local_hosts_no_tx_info },
+  { "getLocalHostsInfoNoTXTCP", ntop_get_interface_local_hosts_no_tcp_tx_info },
   { "getRemoteHostsInfo",       ntop_get_interface_remote_hosts_info },
   { "getRemoteHostsInfoNoTX",   ntop_get_interface_remote_hosts_no_tx_info },
+  { "getRemoteHostsInfoNoTXTCP",ntop_get_interface_remote_hosts_no_tcp_tx_info },
   { "getBroadcastDomainHostsInfo", ntop_get_interface_broadcast_domain_hosts_info },
   { "getPublicHostsInfo",          ntop_get_public_hosts_info },
   { "getBatchedFlowsInfo",         ntop_get_batched_interface_flows_info },
@@ -4610,6 +4646,7 @@ static luaL_Reg _ntop_interface_reg[] = {
   { "listHTTPhosts",            ntop_list_http_hosts },
   { "findHost",                 ntop_get_interface_find_host },
   { "findHostByMac",            ntop_get_interface_find_host_by_mac },
+  { "resetHostTopSites",                ntop_reset_interface_host_top_sites },
   { "updateTrafficMirrored",            ntop_update_traffic_mirrored                 },
   { "updateDynIfaceTrafficPolicy",      ntop_update_dynamic_interface_traffic_policy },
   { "updateLbdIdentifier",              ntop_update_lbd_identifier                   },

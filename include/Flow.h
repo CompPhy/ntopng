@@ -99,6 +99,7 @@ class Flow : public GenericHashEntry {
 #endif
   CounterTrend throughputTrend, goodputTrend, thptRatioTrend;
 #endif
+  char *ndpiAddressFamilyProtocol; 
   ndpi_protocol ndpiDetectedProtocol;
   custom_app_t custom_app;
   json_object *json_info;
@@ -910,6 +911,9 @@ class Flow : public GenericHashEntry {
 
   inline u_int32_t getErrorCode()        { return(protocolErrorCode); }
   inline void setErrorCode(u_int32_t rc) { protocolErrorCode = rc;    }
+  
+  inline char* getAddressFamilyProtocol() const      { return(ndpiAddressFamilyProtocol);         }
+  inline void  setAddressFamilyProtocol(char* proto) { ndpiAddressFamilyProtocol = strdup(proto); }
   
   inline ndpi_confidence_t getConfidence()        { return(confidence); }
   inline void setConfidence(ndpi_confidence_t rc) { confidence = rc;    }
